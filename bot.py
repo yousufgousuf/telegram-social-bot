@@ -12,10 +12,8 @@ from telegram.ext import (
     filters,
 )
 
-# تحميل متغيرات البيئة من .env
 load_dotenv()
 
-# متغيّرات البيئة
 TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHANNEL  = os.getenv("TELEGRAM_CHANNEL")
 TW_CONSUMER_KEY        = os.getenv("TW_CONSUMER_KEY")
@@ -44,21 +42,47 @@ def post_to_facebook(text, media_path=None, is_video=False):
     if media_path:
         endpoint = "photos" if not is_video else "videos"
         url = f"https://graph.facebook.com/{page}/{endpoint}"
-        files = {"source": open(media_path, "rb")}
-        data = {
-            "caption" if not is_video else "description": text,
-            "access_token": FACEBOOK_TOKEN
-        }
-        requests.post(url, data=data, files=files)
+        with open(media_path, "rb") as f:
+            files = {"source": f}
+            data = {
+                "caption" if not is_video else "description": text,
+                "access_token": FACEBOOK_TOKEN
+            }
+            requests.post(url, data=data, files=files)
     else:
         url = f"https://graph.facebook.com/{page}/feed"
         requests.post(url, data={"message": text, "access_token": FACEBOOK_TOKEN})
+
+# لوحة الكيبورد الثابتة
+def make_keyboard(selected: set):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"{'✓ ' if 'TW' in selected else ''}Twitter", callback_data="TW"),
+            InlineKeyboardButton(f"{'✓ ' if 'FB' in selected else ''}Facebook", callback_data="FB"),
+            InlineKeyboardButton(f"{'✓ ' if 'TG' in selected else ''}Telegram", callback_data="TG"),
+        ],
+        [InlineKeyboardButton("إرسال على الكل ✅", callback_data="ALL")],
+    ])
 
 # /start handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "مرحباً!\n"
-        "أرسل لي نصّ المنشور مع صورة/فيديو (اختياري)، سأعرض لك ثمّ أرسل على المنصات."
+        "أرسل نصّ المنشور أو صورة/فيديو (اختياري)، ثم اختر المنصات للنشر."
+    )
+
+# handle incoming text-only
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    context.user_data["payload"] = {
+        "text": text,
+        "media": None,
+        "is_video": False,
+        "platforms": set()
+    }
+    await update.message.reply_text(
+        "اختر المنصات للنشر:",
+        reply_markup=make_keyboard(set())
     )
 
 # handle incoming photo or video
@@ -77,15 +101,10 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "platforms": set()
     }
 
-    keyboard = [
-        [
-            InlineKeyboardButton("Twitter", callback_data="TW"),
-            InlineKeyboardButton("Facebook", callback_data="FB"),
-            InlineKeyboardButton("Telegram", callback_data="TG"),
-        ],
-        [InlineKeyboardButton("إرسال على الكل ✅", callback_data="ALL")],
-    ]
-    await msg.reply_text("اختر المنصات للنشر:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await msg.reply_text(
+        "اختر المنصات للنشر:",
+        reply_markup=make_keyboard(set())
+    )
 
 # button press handler
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,37 +113,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     payload = context.user_data.get("payload")
     if not payload:
-        return await query.edit_message_text("أرسل صورة أو فيديو أولاً.")
+        return await query.edit_message_text("أرسل نصًّا أو صورة/فيديو ثم حاول مرة أخرى.")
 
+    # اختيار منصة مفردة
     if data in {"TW", "FB", "TG"}:
         payload["platforms"].add(data)
-        chosen = ", ".join(payload["platforms"])
-        return await query.edit_message_text(f"✓ اخترت: {chosen}\nاضغط إرسال للكل.")
+        chosen = payload["platforms"]
+        await query.edit_message_text(
+            f"✓ اخترت: {', '.join(chosen)}\nاضغط إرسال للكل.",
+            reply_markup=make_keyboard(chosen)
+        )
+        return
 
-    # ALL
-    text = payload["text"]
-    media = payload["media"]
-    is_vid = payload["is_video"]
-    plats = payload["platforms"] or {"TW", "FB", "TG"}
+    # إرسال للكل
+    if data == "ALL":
+        text = payload["text"]
+        media = payload["media"]
+        is_vid = payload["is_video"]
+        plats = payload["platforms"] or {"TW", "FB", "TG"}
 
-    if "TW" in plats:
-        post_to_twitter(text, media)
-    if "FB" in plats:
-        post_to_facebook(text, media, is_vid)
-    if "TG" in plats:
-        bot = Bot(TELEGRAM_TOKEN)
-        if is_vid:
-            await bot.send_video(chat_id=TELEGRAM_CHANNEL, video=open(media, "rb"), caption=text)
-        else:
-            await bot.send_photo(chat_id=TELEGRAM_CHANNEL, photo=open(media, "rb"), caption=text)
+        if "TW" in plats:
+            post_to_twitter(text, media)
+        if "FB" in plats:
+            post_to_facebook(text, media, is_vid)
+        if "TG" in plats:
+            bot = Bot(TELEGRAM_TOKEN)
+            if is_vid:
+                await bot.send_video(chat_id=TELEGRAM_CHANNEL, video=open(media, "rb"), caption=text)
+            else:
+                await bot.send_photo(chat_id=TELEGRAM_CHANNEL, photo=open(media, "rb"), caption=text)
 
-    await query.edit_message_text("🚀 تم النشر على: " + ", ".join(plats))
-    context.user_data.clear()
+        # إزالة الكيبورد وإظهار تأكيد نهائي
+        await query.edit_message_text(
+            "🚀 تم النشر على: " + ", ".join(plats)
+        )
+        context.user_data.clear()
+        return
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(button_handler))
     print("🤖 Bot is now polling for updates...")
     app.run_polling()
